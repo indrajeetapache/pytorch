@@ -2290,6 +2290,24 @@ assert not torch.cuda.is_initialized()
             delattr(torch, backend_name)
             del sys.modules[f"torch.{backend_name}"]
 
+    def test_to_unavailable_cuda_skips_const_prop(self):
+        # Regression for #201733: when some other accelerator makes
+        # avoid_device_init False, .to("cuda") must still skip const-prop if
+        # CUDA itself is unavailable (else real empty_strided on CUDA raises).
+        with (
+            patch.object(FakeTensorModeCls, "avoid_device_init", False),
+            patch("torch.cuda.is_available", return_value=False),
+        ):
+            fake_mode = FakeTensorModeCls(allow_non_fake_inputs=True)
+            x = torch.zeros(2)
+            with fake_mode:
+                y = x.to("cuda:0")
+                z = torch.ops.prims.device_put.default(x, torch.device("cuda:0"))
+            self.assertTrue(is_fake_tensor(y))
+            self.assertEqual(y.device, torch.device("cuda", 0))
+            self.assertTrue(is_fake_tensor(z))
+            self.assertEqual(z.device, torch.device("cuda", 0))
+
     def test_unique_output_dtype(self):
         shape_env = ShapeEnv()
         for input_dtype in [torch.float32, torch.float16, torch.bfloat16]:

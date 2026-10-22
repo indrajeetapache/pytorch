@@ -132,6 +132,20 @@ def _is_indexed_device_type(device_type: str) -> bool:
     ]
 
 
+def _is_device_type_available(device_type: str) -> bool:
+    """True if ``device_type`` can actually run kernels on this build/host.
+
+    Used to skip FakeTensor const-prop on device moves whose destination is not
+    available (e.g. ``.to("cuda")`` when only PrivateUse1 is present). Unlike
+    ``avoid_device_init``, this is per destination type, not "any accelerator".
+    """
+    if device_type in ("cpu", "meta"):
+        return True
+    mod = getattr(torch, device_type, None)
+    is_avail = getattr(mod, "is_available", None) if mod is not None else None
+    return bool(is_avail()) if callable(is_avail) else False
+
+
 def _pin_device_index(device: torch.device) -> torch.device:
     """``device`` with its index resolved, if it has one to resolve.
 
@@ -3054,22 +3068,30 @@ class FakeTensorMode(TorchDispatchMode):
 
         is_lift_func = func in self.lift_fns
 
-        # If we are trying to avoid device init, then we need to avoid constant
-        # prop on constant tensors for ops that change devices.
+        # Skip const-prop on device moves when we must not touch the destination
+        # backend: either global avoid_device_init (no accelerator at all), or
+        # this specific destination type is unavailable (e.g. .to("cuda") when
+        # only PrivateUse1/NPU is present — #201733).
         avoiding_device_init = False
-        if self.avoid_device_init:
-            if (
-                func is torch.ops.aten._to_copy.default
-                and "device" in kwargs
-                and kwargs["device"].type != "cpu"  # type: ignore[attr-defined]
+        if func is torch.ops.aten._to_copy.default and "device" in kwargs:
+            dst_type = kwargs["device"].type  # type: ignore[attr-defined]
+            if dst_type != "cpu" and (
+                self.avoid_device_init or not _is_device_type_available(dst_type)
             ):
                 avoiding_device_init = True
-            if func is torch.ops.prims.device_put.default:
+        elif func is torch.ops.prims.device_put.default:
+            dst = args[1] if len(args) > 1 else kwargs.get("device")
+            dst_type = dst.type if isinstance(dst, torch.device) else None
+            if self.avoid_device_init or (
+                dst_type is not None
+                and dst_type != "cpu"
+                and not _is_device_type_available(dst_type)
+            ):
                 avoiding_device_init = True
 
         # skip const prop for aten._to_copy if
         # 1. input tensor is on "meta" device
-        # 2. destination device is unavailable, captured by `avoiding_device_init`
+        # 2. destination device is unavailable (global or per-type), above
         device_conversion_skip_const_prop = (
             func is torch.ops.aten._to_copy.default
             and isinstance(args[0], torch.Tensor)

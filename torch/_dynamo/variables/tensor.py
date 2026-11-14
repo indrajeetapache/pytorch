@@ -3619,8 +3619,8 @@ class NumpyNdarrayVariable(TensorVariable):
             return VariableTracker.build(tx, int(r))
         return self._insert_attr_into_graph(tx, "size")
 
-    # numpy's array_getsetlist leaves T/size read-only; real/imag/flat/shape/strides
-    # are writable in eager but Dynamo does not model those writes.
+    # numpy's array_getsetlist leaves T read-only; real/imag/flat do have setters,
+    # but they write the array in place and the VT is a functional graph proxy.
     tp_getset = {
         "ndim": GetSet(_get_ndim, readonly_setter),
         "itemsize": GetSet(_get_itemsize, readonly_setter),
